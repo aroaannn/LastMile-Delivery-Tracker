@@ -1,0 +1,205 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  AGENT
+  ADMIN
+}
+
+enum OrderType {
+  B2B
+  B2C
+}
+
+enum PaymentType {
+  PREPAID
+  COD
+}
+
+enum ZoneRelation {
+  INTRA
+  INTER
+}
+
+enum SurchargeType {
+  FLAT
+  PERCENT
+}
+
+enum OrderStatus {
+  CREATED
+  ASSIGNED
+  PICKED_UP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+  RESCHEDULED
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+}
+
+enum NotificationStatus {
+  SENT
+  FAILED
+}
+
+model User {
+  id            String   @id @default(uuid())
+  name          String
+  email         String   @unique
+  passwordHash  String
+  phone         String?
+  role          Role     @default(CUSTOMER)
+
+  // Agent-only fields
+  isAvailable   Boolean  @default(true)
+  homeZoneId    String?
+  homeZone      Zone?    @relation(fields: [homeZoneId], references: [id])
+
+  createdAt     DateTime @default(now())
+
+  ordersAsCustomer Order[] @relation("CustomerOrders")
+  ordersAsAgent    Order[] @relation("AgentOrders")
+  statusChanges    OrderStatusHistory[]
+}
+
+model Zone {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  code      String   @unique
+  createdAt DateTime @default(now())
+
+  areas     Area[]
+  agents    User[]
+
+  ratesFrom RateCard[] @relation("RateZoneFrom")
+  ratesTo   RateCard[] @relation("RateZoneTo")
+
+  pickupOrders Order[] @relation("PickupZone")
+  dropOrders   Order[] @relation("DropZone")
+}
+
+// An Area represents a pincode / locality that admin maps to a Zone.
+// This is how the system performs "zone detection" from an address.
+model Area {
+  id      String @id @default(uuid())
+  name    String
+  pincode String @unique
+  zoneId  String
+  zone    Zone   @relation(fields: [zoneId], references: [id])
+
+  pickupOrders Order[] @relation("PickupArea")
+  dropOrders   Order[] @relation("DropArea")
+}
+
+// Rate card: admin-configurable, one row per (orderType, zoneRelation) combination,
+// e.g. B2C-INTRA, B2C-INTER, B2B-INTRA, B2B-INTER.
+// zoneFromId/zoneToId are optional overrides for zone-pair-specific pricing;
+// when null, the card acts as the default rate for that orderType+relation.
+model RateCard {
+  id            String       @id @default(uuid())
+  orderType     OrderType
+  zoneRelation  ZoneRelation
+  zoneFromId    String?
+  zoneFrom      Zone?        @relation("RateZoneFrom", fields: [zoneFromId], references: [id])
+  zoneToId      String?
+  zoneTo        Zone?        @relation("RateZoneTo", fields: [zoneToId], references: [id])
+  baseCharge    Float        // flat charge included regardless of weight
+  perKgRate     Float        // charge per kg of chargeable weight
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([orderType, zoneRelation, zoneFromId, zoneToId])
+}
+
+// COD surcharge configuration, admin-configurable per order type.
+model CodConfig {
+  id            String        @id @default(uuid())
+  orderType     OrderType     @unique
+  surchargeType SurchargeType
+  value         Float         // flat amount, or percent (0-100) of base charge
+  updatedAt     DateTime      @updatedAt
+}
+
+model Order {
+  id              String       @id @default(uuid())
+
+  customerId      String
+  customer        User         @relation("CustomerOrders", fields: [customerId], references: [id])
+
+  agentId         String?
+  agent           User?        @relation("AgentOrders", fields: [agentId], references: [id])
+
+  pickupAddress   String
+  pickupAreaId    String
+  pickupArea      Area         @relation("PickupArea", fields: [pickupAreaId], references: [id])
+  pickupZoneId    String
+  pickupZone      Zone         @relation("PickupZone", fields: [pickupZoneId], references: [id])
+
+  dropAddress     String
+  dropAreaId      String
+  dropArea        Area         @relation("DropArea", fields: [dropAreaId], references: [id])
+  dropZoneId      String
+  dropZone        Zone         @relation("DropZone", fields: [dropZoneId], references: [id])
+
+  lengthCm        Float
+  breadthCm       Float
+  heightCm        Float
+  actualWeightKg  Float
+  volumetricWeightKg Float
+  chargeableWeightKg Float
+
+  orderType       OrderType
+  paymentType     PaymentType
+  zoneRelation    ZoneRelation
+
+  baseCharge      Float
+  codSurcharge    Float
+  totalCharge     Float
+
+  status          OrderStatus  @default(CREATED)
+  rescheduledDate DateTime?
+  failureReason   String?
+
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  statusHistory   OrderStatusHistory[]
+  notifications   Notification[]
+}
+
+// Immutable append-only log — every status transition is recorded here and never edited.
+model OrderStatusHistory {
+  id        String      @id @default(uuid())
+  orderId   String
+  order     Order       @relation(fields: [orderId], references: [id])
+  status    OrderStatus
+  note      String?
+  actorId   String?
+  actor     User?        @relation(fields: [actorId], references: [id])
+  actorRole Role?
+  createdAt DateTime    @default(now())
+}
+
+model Notification {
+  id        String              @id @default(uuid())
+  orderId   String
+  order     Order               @relation(fields: [orderId], references: [id])
+  channel   NotificationChannel
+  recipient String
+  subject   String
+  body      String
+  status    NotificationStatus
+  createdAt DateTime            @default(now())
+}
